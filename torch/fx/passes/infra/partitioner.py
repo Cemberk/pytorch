@@ -1,4 +1,4 @@
-from typing import Dict, List, Set, Iterable, Sequence, Optional
+from typing import Dict, List, Set, Iterable, Sequence, Optional, Deque
 
 from torch.fx.passes.utils.fuser_utils import fuse_by_partitions
 
@@ -9,6 +9,7 @@ from torch.fx.passes.operator_support import OperatorSupportBase
 import logging
 import itertools
 from copy import copy
+from collections import deque
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.WARNING)
@@ -56,7 +57,7 @@ class CapabilityBasedPartitioner:
 
     def propose_partitions(self) -> List[Partition]:
         # assumptions: nodes in candidate list is sorted in topological order
-        assignment: Dict[Node, int] = {}   # maping from node to partition_id
+        assignment: Dict[Node, int] = {}   # mapping from node to partition_id
         partitions_by_id: Dict[int, Partition] = {}  # mapping from partition_id to partition
         new_partition_id = itertools.count()
 
@@ -73,33 +74,40 @@ class CapabilityBasedPartitioner:
             # the set.
             visited: Set[Node] = set()
 
-            def dfs_find_cycle(node):
-                if node in visited:
-                    return False
-                if node in merged_nodes:
-                    return True  # found cycle, return
+            def dfs_iter_find_cycle(root_node):
+                stack : Deque[Node] = deque()
+                stack.append(root_node)
 
-                visited.add(node)
-                # branching on hitting partition or not
-                if node in assignment:
-                    # Since partition is not merged in the graph yet, when we
-                    # hit a node in a partition through DFS, we need to
-                    # traverse all nodes in the partition to properly reflect
-                    # dependencies after the fusion
-                    for p_node in partitions_by_id[assignment[node]].nodes:
-                        for user_node in p_node.users:
-                            if user_node not in partitions_by_id[assignment[node]].nodes and dfs_find_cycle(user_node):
-                                return True
-                else:
-                    for user_node in node.users:
-                        if dfs_find_cycle(user_node):
-                            return True
+                while stack:
+                    node = stack.pop()
+
+                    if node in visited:
+                        continue
+                    if node in merged_nodes:
+                        return True  # found cycle, return
+
+                    # branching on hitting partition or not
+                    if node in assignment:
+                        # Since partition is not merged in the graph yet, when we
+                        # hit a node in a partition through DFS, we need to
+                        # traverse all nodes in the partition to properly reflect
+                        # dependencies after the fusion
+                        for p_node in partitions_by_id[assignment[node]].nodes:
+                            for user_node in p_node.users:
+                                if user_node not in partitions_by_id[assignment[node]].nodes:
+                                    stack.append(user_node)
+                    else:
+                        for user_node in node.users:
+                            stack.append(user_node)
+
+                    visited.add(node)
+
                 return False
 
             # check if merge would create cyclic dependency.
             for node in merged_nodes:
                 for user_node in node.users:
-                    if user_node not in merged_nodes and dfs_find_cycle(user_node):
+                    if user_node not in merged_nodes and dfs_iter_find_cycle(user_node):
                         # return false indicating cyclic dependency found and
                         # merge is aborted
                         return False
@@ -153,7 +161,7 @@ class CapabilityBasedPartitioner:
                 self_id = merge_candidates_list[0]
                 for other_id in merge_candidates_list[1:]:
                     # note: merge partition `other_id` into partition `self_id` if
-                    # it doesn't create cyclic depenency in the graph, otherwise,
+                    # it doesn't create cyclic dependency in the graph, otherwise,
                     # this is a no-op
                     maybe_merge_partition(self_id, other_id)
 
@@ -199,7 +207,7 @@ class CapabilityBasedPartitioner:
 
         logger.debug("Partitions proposed:")
         for id, partition in partitions_by_id.items():
-            logger.debug(f"partition #{id}", [node.name for node in partition.nodes])
+            logger.debug("partition #%s: %s", id, [node.name for node in partition.nodes])
 
         return list(partitions_by_id.values())
 

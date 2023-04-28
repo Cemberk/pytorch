@@ -2,6 +2,7 @@ import gzip
 import io
 import json
 import os
+import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
 from typing import Any, Dict, List
@@ -12,6 +13,7 @@ import rockset  # type: ignore[import]
 
 PYTORCH_REPO = "https://api.github.com/repos/pytorch/pytorch"
 S3_RESOURCE = boto3.resource("s3")
+TARGET_WORKFLOW = "--rerun-disabled-tests"
 
 
 def _get_request_headers() -> Dict[str, str]:
@@ -104,19 +106,24 @@ def download_gha_artifacts(
     return paths
 
 
-def upload_to_rockset(collection: str, docs: List[Any]) -> None:
+def upload_to_rockset(
+    collection: str, docs: List[Any], workspace: str = "commons"
+) -> None:
     print(f"Writing {len(docs)} documents to Rockset")
-    client = rockset.Client(
-        api_server="api.rs2.usw2.rockset.com", api_key=os.environ["ROCKSET_API_KEY"]
+    client = rockset.RocksetClient(
+        host="api.usw2a1.rockset.com", api_key=os.environ["ROCKSET_API_KEY"]
     )
-    client.Collection.retrieve(collection).add_docs(docs)
+    client.Documents.add_documents(
+        collection=collection,
+        data=docs,
+        workspace=workspace,
+    )
     print("Done!")
 
 
 def upload_to_s3(
-    workflow_run_id: int,
-    workflow_run_attempt: int,
-    collection: str,
+    bucket_name: str,
+    key: str,
     docs: List[Dict[str, Any]],
 ) -> None:
     print(f"Writing {len(docs)} documents to S3")
@@ -126,14 +133,25 @@ def upload_to_s3(
         body.write("\n")
 
     S3_RESOURCE.Object(
-        "ossci-raw-job-status",
-        f"{collection}/{workflow_run_id}/{workflow_run_attempt}",
+        f"{bucket_name}",
+        f"{key}",
     ).put(
         Body=gzip.compress(body.getvalue().encode()),
         ContentEncoding="gzip",
         ContentType="application/json",
     )
     print("Done!")
+
+
+def upload_workflow_stats_to_s3(
+    workflow_run_id: int,
+    workflow_run_attempt: int,
+    collection: str,
+    docs: List[Dict[str, Any]],
+) -> None:
+    bucket_name = "ossci-raw-job-status"
+    key = f"{collection}/{workflow_run_id}/{workflow_run_attempt}"
+    upload_to_s3(bucket_name, key, docs)
 
 
 def upload_file_to_s3(
@@ -165,3 +183,16 @@ def unzip(p: Path) -> None:
 
     with zipfile.ZipFile(p, "r") as zip:
         zip.extractall(unzipped_dir)
+
+
+def is_rerun_disabled_tests(root: ET.ElementTree) -> bool:
+    """
+    Check if the test report is coming from rerun_disabled_tests workflow
+    """
+    skipped = root.find(".//*skipped")
+    # Need to check against None here, if not skipped doesn't work as expected
+    if skipped is None:
+        return False
+
+    message = skipped.attrib.get("message", "")
+    return TARGET_WORKFLOW in message or "num_red" in message

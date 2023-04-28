@@ -180,6 +180,7 @@ def _rebuild_tensor_v2(
 
 _sparse_tensors_to_validate: List["torch.Tensor"] = []
 
+
 # In _legacy_load() in serialization.py we unpickle storages after the sparse
 # tensors have been already unpickled. Those storages contain data necessary for
 # validating sparse tensors: indices and values. That's why sparse tensors are
@@ -193,15 +194,30 @@ _sparse_tensors_to_validate: List["torch.Tensor"] = []
 def _validate_loaded_sparse_tensors():
     try:
         for t in _sparse_tensors_to_validate:
-            if t.is_sparse:
+            if t.layout is torch.sparse_coo:
                 torch._validate_sparse_coo_tensor_args(
                     t._indices(), t._values(), t.size()
                 )
-            elif t.is_sparse_csr:
+            elif t.layout in {
+                torch.sparse_csr,
+                torch.sparse_csc,
+                torch.sparse_bsr,
+                torch.sparse_bsc,
+            }:
                 # TODO: Validation currently involves an expensive traversal
                 # on CPU, which may include a device transfer.
-                torch._validate_sparse_csr_tensor_args(
-                    t.crow_indices(), t.col_indices(), t.values(), t.size()
+                if t.layout in {torch.sparse_csr, torch.sparse_bsr}:
+                    compressed_indices, plain_indices = (
+                        t.crow_indices(),
+                        t.col_indices(),
+                    )
+                else:
+                    compressed_indices, plain_indices = (
+                        t.ccol_indices(),
+                        t.row_indices(),
+                    )
+                torch._validate_sparse_compressed_tensor_args(
+                    compressed_indices, plain_indices, t.values(), t.size(), t.layout
                 )
             else:
                 raise NotImplementedError(
@@ -222,18 +238,24 @@ def _rebuild_sparse_tensor(layout, data):
     """
     if layout == torch.sparse_coo:
         indices, values, size = data
-        result = torch._sparse_coo_tensor_unsafe(indices, values, size)
+        result = torch.sparse_coo_tensor(indices, values, size, check_invariants=False)
         _sparse_tensors_to_validate.append(result)
         return result
 
-    raise NotImplementedError("rebuilding sparse tensor for layout %s" % (layout))
-
-
-def _rebuild_sparse_csr_tensor(layout, data):
-    if layout == torch.sparse_csr:
-        crow_indices, col_indices, values, size = data
-        result = torch._sparse_csr_tensor_unsafe(
-            crow_indices, col_indices, values, size
+    elif layout in {
+        torch.sparse_csr,
+        torch.sparse_csc,
+        torch.sparse_bsr,
+        torch.sparse_bsc,
+    }:
+        compressed_indices, plain_indices, values, size = data
+        result = torch.sparse_compressed_tensor(
+            compressed_indices,
+            plain_indices,
+            values,
+            size,
+            layout=layout,
+            check_invariants=False,
         )
         _sparse_tensors_to_validate.append(result)
         return result
@@ -336,8 +358,6 @@ def _rebuild_parameter(data, requires_grad, backward_hooks):
     return param
 
 
-# TODO(kshitij12345): Support serializing nn.Parameter with Python Attributes.
-# NOTE: We are just defining it here now for future use.
 def _rebuild_parameter_with_state(data, requires_grad, backward_hooks, state):
     param = torch.nn.Parameter(data, requires_grad)
     # NB: This line exists only for backwards compatibility; the
@@ -355,6 +375,8 @@ def _get_obj_state(obj):
     # This loosely mimicks the function on the object class but since Tensor do not inherit
     # from it, we cannot call that function directly
     # https://github.com/python/cpython/blob/c83919bd635f4433f1c6ae8504996a9fe3c215e5/Objects/typeobject.c#L4891
+    # Note that starting with Python 3.11, this `__getstate__` is always defined and thus
+    # the else branch will never be taken.
     getstate_fn = getattr(obj, "__getstate__", None)
     if getstate_fn:
         state = getstate_fn()
@@ -385,8 +407,11 @@ def _set_obj_state(obj, state):
         dict_state = state
         slots_state = None
 
-    for k, v in dict_state.items():
-        setattr(obj, k, v)
+    # Starting with Python 3.11, the __dict__ attribute is lazily created
+    # and is serialized as None when not needed.
+    if dict_state:
+        for k, v in dict_state.items():
+            setattr(obj, k, v)
 
     if slots_state:
         for k, v in slots_state.items():
@@ -583,7 +608,7 @@ class KeyErrorMessage(str):
         return self
 
 
-class ExceptionWrapper(object):
+class ExceptionWrapper:
     r"""Wraps an exception plus traceback to communicate across threads"""
 
     def __init__(self, exc_info=None, where="in background"):
@@ -625,6 +650,10 @@ def _get_available_device_type():
         return "cuda"
     if hasattr(torch, "xpu") and torch.xpu.is_available():  # type: ignore[attr-defined]
         return "xpu"
+    custom_backend_name = torch._C._get_privateuse1_backend_name()
+    custom_device_mod = getattr(torch, custom_backend_name, None)
+    if custom_device_mod and custom_device_mod.is_available():
+        return custom_backend_name
     # add more available device types here
     return None
 
@@ -635,6 +664,8 @@ def _get_device_attr(get_member):
         return get_member(torch.cuda)
     if device_type and device_type.lower() == "xpu":
         return get_member(torch.xpu)  # type: ignore[attr-defined]
+    if device_type == torch._C._get_privateuse1_backend_name():
+        return get_member(getattr(torch, device_type))
     # add more available device types here
     return None
 
@@ -756,3 +787,8 @@ def classproperty(func):
     if not isinstance(func, (classmethod, staticmethod)):
         func = classmethod(func)
     return _ClassPropertyDescriptor(func)
+
+
+# Whether we are compiling with torch.compile or not
+def is_compiling():
+    return False

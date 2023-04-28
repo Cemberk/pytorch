@@ -50,7 +50,7 @@ def as_nested_tensor(
         tensor([0., 0., 0., 0., 0.])
     """
     if not isinstance(tensor_list, list) or any(
-        [not torch.is_tensor(t) for t in tensor_list]
+        not isinstance(t, Tensor) for t in tensor_list
     ):
         raise TypeError(
             "nested_tensor(): Expected first argument to be a list of tensors "
@@ -125,8 +125,8 @@ Constructs a nested tensor with no autograd history (also known as a “leaf ten
 :ref:`Autograd mechanics <autograd-mechanics>`) from :attr:`tensor_list` a list of tensors.
 
 Args:
-    tensor_list (List[array_like]): a list of tensors (or anything that can be passed to torch.tensor)
-    where their first dimension can be of irregular size, but all other dimensions have to be equal.
+    tensor_list (List[array_like]): a list of tensors, or anything that can be passed to torch.tensor,
+    where each element of the list has the same dimensionality.
 
 Keyword arguments:
     dtype (:class:`torch.dtype`, optional): the desired type of returned nested tensor.

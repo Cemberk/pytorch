@@ -97,10 +97,10 @@ class Tensor(torch._C._TensorBase):
             # Update the test in test_serialization if you remove 'meta' from here
             if (
                 self.is_sparse
-                or self.device.type in ["lazy", "xla", "mps", "ort", "meta", "hpu"]
+                or self.device.type in ["lazy", "xla", "mps", "ort", "meta", "ipu"]
                 or (
                     not torch._C._has_storage(self)
-                    and self.device.type == "privateuseone"
+                    and self.device.type == torch._C._get_privateuse1_backend_name()
                 )
                 or (type(self) is not Tensor and self.data_ptr() == 0)
             ):
@@ -187,7 +187,7 @@ class Tensor(torch._C._TensorBase):
             if self.grad is not None:
                 new_tensor.grad = self.grad.__deepcopy__(memo)
 
-            if not type(self) is Tensor:
+            if type(self) is not Tensor:
                 if type(new_tensor) is not type(self):
                     raise RuntimeError(
                         "Type of deepcopy result does not match the type of the source tensor. "
@@ -217,23 +217,27 @@ class Tensor(torch._C._TensorBase):
 
     def storage(self):
         r"""
-        storage() -> torch.Storage
+        storage() -> torch.TypedStorage
 
-        Returns the underlying storage.
+        Returns the underlying :class:`TypedStorage`.
+
+        .. warning::
+
+            :class:`TypedStorage` is deprecated. It will be removed in the future, and
+            :class:`UntypedStorage` will be the only storage class. To access the
+            :class:`UntypedStorage` directly, use :attr:`Tensor.untyped_storage()`.
         """
         if has_torch_function_unary(self):
             return handle_torch_function(Tensor.storage, (self,), self)
 
-        torch.storage._warn_typed_storage_removal()
+        torch.storage._warn_typed_storage_removal(stacklevel=2)
         return self._typed_storage()
 
     # For internal use only, to avoid raising deprecation warning
     def _typed_storage(self):
-        _storage = self._storage()
-        if isinstance(_storage, torch.TypedStorage):
-            _storage = _storage._untyped_storage
+        untyped_storage = self.untyped_storage()
         return torch.TypedStorage(
-            wrap_storage=_storage, dtype=self.dtype, _internal=True
+            wrap_storage=untyped_storage, dtype=self.dtype, _internal=True
         )
 
     def _reduce_ex_internal(self, proto):
@@ -251,8 +255,9 @@ class Tensor(torch._C._TensorBase):
         # 2. Python list is not a good fit due to performance reason.
         #    `tolist()` converts every single element in the tensor into python objects
         #    and serialize them one by one.
-        if self.device.type in ["xla", "ort", "hpu"] or (
-            not torch._C._has_storage(self) and self.device.type == "privateuseone"
+        if self.device.type in ["xla", "ort"] or (
+            not torch._C._has_storage(self)
+            and self.device.type == torch._C._get_privateuse1_backend_name()
         ):
             # Convert BFloat16 tesors to Float32 before conversion to numpy, as numpy doesn't
             # support BFloat16. The rebuild tensor from numpy takes in the original self.dtype,
@@ -331,22 +336,32 @@ class Tensor(torch._C._TensorBase):
                     "sparse tensor __reduce_ex__ for layout `%s`" % (self.layout)
                 )
             return (torch._utils._rebuild_sparse_tensor, args_sparse)
-        elif self.is_sparse_csr:
-            if self.layout == torch.sparse_csr:
-                args_sparse_csr = (
-                    self.layout,
-                    (
-                        self.crow_indices(),
-                        self.col_indices(),
-                        self.values(),
-                        self.size(),
-                    ),
+        elif self.layout in {
+            torch.sparse_csr,
+            torch.sparse_csc,
+            torch.sparse_bsr,
+            torch.sparse_bsc,
+        }:
+            if self.layout in {torch.sparse_csr, torch.sparse_bsr}:
+                compressed_indices, plain_indices = (
+                    self.crow_indices(),
+                    self.col_indices(),
                 )
             else:
-                raise NotImplementedError(
-                    "sparse csr tensor __reduce_ex__ for layout `%s`" % (self.layout)
+                compressed_indices, plain_indices = (
+                    self.ccol_indices(),
+                    self.row_indices(),
                 )
-            return (torch._utils._rebuild_sparse_csr_tensor, args_sparse_csr)
+            args_sparse_compressed = (
+                self.layout,
+                (
+                    compressed_indices,
+                    plain_indices,
+                    self.values(),
+                    self.size(),
+                ),
+            )
+            return (torch._utils._rebuild_sparse_tensor, args_sparse_compressed)
         elif (
             self.data_ptr() == 0
             and type(self) is not torch.Tensor
@@ -414,7 +429,7 @@ class Tensor(torch._C._TensorBase):
     def backward(
         self, gradient=None, retain_graph=None, create_graph=False, inputs=None
     ):
-        r"""Computes the gradient of current tensor w.r.t. graph leaves.
+        r"""Computes the gradient of current tensor wrt graph leaves.
 
         The graph is differentiated using the chain rule. If the tensor is
         non-scalar (i.e. its data has more than one element) and requires
@@ -488,6 +503,10 @@ class Tensor(torch._C._TensorBase):
 
         This function returns a handle with a method ``handle.remove()``
         that removes the hook from the module.
+
+        .. note::
+            See :ref:`backward-hooks-execution` for more information on how when this hook
+            is executed, and how its execution is ordered relative to other hooks.
 
         Example::
 
@@ -614,7 +633,13 @@ class Tensor(torch._C._TensorBase):
         else:
             return self.flip(0)
 
-    def norm(self, p="fro", dim=None, keepdim=False, dtype=None):
+    def norm(
+        self,
+        p: Optional[Union[float, str]] = "fro",
+        dim=None,
+        keepdim=False,
+        dtype=None,
+    ):
         r"""See :func:`torch.norm`"""
         if has_torch_function_unary(self):
             return handle_torch_function(
@@ -636,6 +661,11 @@ class Tensor(torch._C._TensorBase):
         from ._linalg_utils import eig
 
         return eig(self, eigenvectors=eigenvectors)
+
+    def symeig(self, eigenvectors=False):
+        from ._linalg_utils import _symeig
+
+        return _symeig(self, eigenvectors=eigenvectors)
 
     def lu(self, pivot=True, get_infos=False):
         r"""See :func:`torch.lu`"""
@@ -768,7 +798,7 @@ class Tensor(torch._C._TensorBase):
             except ValueError:
                 pass
 
-        if isinstance(split_size, int):
+        if isinstance(split_size, (int, torch.SymInt)):
             return torch._VF.split(self, split_size, dim)  # type: ignore[attr-defined]
         else:
             return torch._VF.split_with_sizes(self, split_size, dim)
@@ -963,7 +993,9 @@ class Tensor(torch._C._TensorBase):
         """
         if has_torch_function_unary(self):
             return handle_torch_function(Tensor.__contains__, (self,), self, element)
-        if isinstance(element, (torch.Tensor, Number)):
+        if isinstance(
+            element, (torch.Tensor, Number, torch.SymInt, torch.SymFloat, torch.SymBool)
+        ):
             # type hint doesn't understand the __contains__ result array
             return (element == self).any().item()  # type: ignore[union-attr]
 
@@ -1090,7 +1122,7 @@ class Tensor(torch._C._TensorBase):
         if has_torch_function_unary(self):
             return handle_torch_function(Tensor.refine_names, (self,), self, *names)
         names = resolve_ellipsis(names, self.names, "refine_names")
-        return super(Tensor, self).refine_names(names)
+        return super().refine_names(names)
 
     def align_to(self, *names):
         r"""Permutes the dimensions of the :attr:`self` tensor to match the order
@@ -1132,8 +1164,8 @@ class Tensor(torch._C._TensorBase):
             return handle_torch_function(Tensor.align_to, (self,), self, *names)
         ellipsis_idx = single_ellipsis_index(names, "align_to")
         if ellipsis_idx is None:
-            return super(Tensor, self).align_to(names)
-        return super(Tensor, self).align_to(
+            return super().align_to(names)
+        return super().align_to(
             [name for name in names if not is_ellipsis(name)], ellipsis_idx
         )
 
@@ -1155,9 +1187,9 @@ class Tensor(torch._C._TensorBase):
             isinstance(sizes, (tuple, list)) and isinstance(sizes[0], (tuple, list))
         ):
             names, sizes = unzip_namedshape(sizes)
-            return super(Tensor, self).unflatten(dim, sizes, names)
+            return super().unflatten(dim, sizes, names)
         else:
-            return super(Tensor, self).unflatten(dim, sizes)
+            return super().unflatten(dim, sizes)
 
     def rename_(self, *names, **rename_map):
         """In-place version of :meth:`~Tensor.rename`."""
@@ -1237,9 +1269,9 @@ class Tensor(torch._C._TensorBase):
 
         # See Note [rename_ / rename API]
         if inplace:
-            return super(Tensor, self).rename_(names)
+            return super().rename_(names)
         else:
-            return super(Tensor, self).rename(names)
+            return super().rename(names)
 
     @classmethod
     def __torch_function__(cls, func, types, args=(), kwargs=None):
@@ -1262,7 +1294,7 @@ class Tensor(torch._C._TensorBase):
         if not all(issubclass(cls, t) for t in types):
             return NotImplemented
 
-        with _C.DisableTorchFunction():
+        with _C.DisableTorchFunctionSubclass():
             ret = func(*args, **kwargs)
             if func in get_default_nowrap_functions():
                 return ret
@@ -1333,6 +1365,8 @@ class Tensor(torch._C._TensorBase):
             device_type = DLDeviceType.kDLGPU
         elif torch_device_type == "cpu":
             device_type = DLDeviceType.kDLCPU
+        elif self.device.type == "xpu":
+            device_type = DLDeviceType.kDLOneAPI
         else:
             raise ValueError(
                 "Unknown device type {} for Dlpack".format(torch_device_type)

@@ -25,9 +25,11 @@ from transformers.models.t5.modeling_t5 import T5Block
 
 
 def setup(rank, world_size):
-    os.environ["MASTER_ADDR"] = "localhost"
-    os.environ["MASTER_PORT"] = "12355"
-    dist.init_process_group("nccl", rank=rank, world_size=world_size)
+    os.environ["MASTER_ADDR"] = os.getenv("MASTER_ADDR", "localhost")
+    os.environ["MASTER_PORT"] = os.getenv("MASTER_PORT", "12355")
+    os.environ["RANK"] = os.getenv("RANK", "0")
+    os.environ["WORLD_SIZE"] = os.getenv("WORLD_SIZE", "1")
+    dist.init_process_group("nccl")
 
 
 def cleanup():
@@ -36,7 +38,7 @@ def cleanup():
 
 class CustomLinear(torch.nn.Module):
     def __init__(self, a, b):
-        super(CustomLinear, self).__init__()
+        super().__init__()
         self.weight = nn.Parameter(torch.randn(a, b))
 
     def forward(self, x):
@@ -45,7 +47,7 @@ class CustomLinear(torch.nn.Module):
 
 class MyModule(torch.nn.Module):
     def __init__(self, a, b):
-        super(MyModule, self).__init__()
+        super().__init__()
         self.net = nn.Sequential(
             nn.Linear(a, b),
             nn.ReLU(),
@@ -57,7 +59,7 @@ class MyModule(torch.nn.Module):
 
 class ToyModel(nn.Module):
     def __init__(self):
-        super(ToyModel, self).__init__()
+        super().__init__()
         self.net = nn.Sequential(
             *[nn.Linear(10, 10000), nn.ReLU()]
             + [nn.Linear(10000, 10000), nn.ReLU()]

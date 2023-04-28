@@ -101,6 +101,8 @@ bool runtimeDispatchKeySetHas(DispatchKey t, DispatchKey k) {
       // See Note [NestedTensor Not Included in Backend Keys]
       return k != DispatchKey::NestedTensor &&
           non_functional_backend_dispatch_keyset.has(k);
+    case DispatchKey::FuncTorchBatchedDecomposition:
+      return functorch_batched_ks.has(k);
     default:
       return t == k;
   }
@@ -257,7 +259,7 @@ std::array<FunctionalityOffsetAndMask, num_functionality_keys>
 initializeFunctionalityOffsetsAndMasks() {
   std::array<FunctionalityOffsetAndMask, num_functionality_keys>
       offsets_and_masks;
-  // manualy set the first entry, which corresponds to Undefined.
+  // manually set the first entry, which corresponds to Undefined.
   offsets_and_masks[0] = FunctionalityOffsetAndMask(0, 0);
   // loop through every functionality key (aside from Undefined).
   for (const auto functionality_idx : c10::irange(1, num_functionality_keys)) {

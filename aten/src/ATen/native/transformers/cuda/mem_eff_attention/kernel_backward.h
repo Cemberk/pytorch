@@ -86,6 +86,9 @@ struct AttentionBackwardKernel {
     output_t* grad_key_ptr; //    [Mk, nH, K]
     output_t* grad_value_ptr; //  [Mk, nH, Kv]
 
+    //  Softmax Scale
+    accum_t scale;
+
     // Dimensions/strides
     int32_t head_dim;
     int32_t head_dim_value;
@@ -687,7 +690,11 @@ struct AttentionBackwardKernel {
   static CUTLASS_DEVICE void kernel(Params& p_) {
     // Hint to nvcc to store points & tensor shapes in registers
     // as we use them a lot
+#if __cplusplus < 201703L
     register const Params p = p_;
+#else
+    const Params p = p_;
+#endif
 
     extern __shared__ char smem_buffer[];
     SharedStorage& shared_storage = *((SharedStorage*)smem_buffer);
@@ -721,7 +728,11 @@ struct AttentionBackwardKernel {
       __syncthreads();
     }
 
+#if __cplusplus < 201703L
     OutputFragments register output_frags;
+#else
+    OutputFragments output_frags;
+#endif
     int32_t key_start = 0;
     int32_t key_end = p.num_keys / kBlockSizeJ * kBlockSizeJ;
     for (; key_start < key_end; key_start += kBlockSizeJ) {
@@ -780,7 +791,7 @@ struct AttentionBackwardKernel {
       int32_t query_start,
       int32_t key_start) {
     cutlass::MatrixCoord no_offset{0, 0};
-    accum_t scale = accum_t(1.0 / std::sqrt(float(p.head_dim)));
+    accum_t scale = p.scale;
     int16_t thread_id = threadIdx.x + threadIdx.y * blockDim.x;
     int8_t warp_id = warp_uniform(threadIdx.y);
     int8_t lane_id = threadIdx.x;

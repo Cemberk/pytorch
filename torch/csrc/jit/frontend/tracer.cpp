@@ -26,9 +26,7 @@
 #include <sstream>
 #include <string>
 
-namespace torch {
-namespace jit {
-namespace tracer {
+namespace torch::jit::tracer {
 
 ////////////////////////////////////////////////////////////////////////////////
 // Recording the traces
@@ -376,7 +374,7 @@ static IValue addInput(
 
     // Unpack the list values statically
     for (const auto& entry : dict) {
-      IValue key = entry.key();
+      const IValue& key = entry.key();
       auto static_key = state->graph->insertConstant(key);
       auto static_value =
           state->graph->insert(aten::__getitem__, {value, static_key});
@@ -554,6 +552,15 @@ void TracingState::setValue(const IValue& v, Value* value) {
     auto& var = v.toTensor();
     AT_ASSERT(var.defined());
     env_stack.back()[v] = value;
+
+    // If the value comes from a CallFunction or CallMethod, it may not have
+    // shape information attached. For debuggability, we enhance the type
+    // information by assigning the concrete value's tupe to the jit::Value.
+    if (auto tensor_type = value->type()->cast<TensorType>()) {
+      if (!tensor_type->isComplete()) {
+        value->inferTypeFrom(var);
+      }
+    }
   } else if (v.isTensorList()) {
     auto outputs = v.toTensorList();
     Node* unpack_node =
@@ -683,7 +690,7 @@ void addInputs(Node* n, const char* name, at::Device value) {
   detail::genericAddInput(n, value);
 }
 void addInputs(Node* n, const char* name, c10::Stream stream) {
-  detail::genericAddInput(n, static_cast<int64_t>(stream.pack()));
+  detail::genericAddInput(n, c10::IValue(stream));
 }
 void addInputs(Node* n, const char* name, at::Layout value) {
   detail::genericAddInput(n, static_cast<int64_t>(value));
@@ -814,7 +821,7 @@ void addInputs(Node* n, const char* name, at::IntArrayRef value) {
 }
 
 void addInputs(Node* n, const char* name, c10::SymIntArrayRef value) {
-  addInputs(n, name, asIntArrayRefSlow(value));
+  addInputs(n, name, C10_AS_INTARRAYREF_SLOW(value));
 }
 
 void addInputs(Node* n, const char* name, c10::optional<c10::SymInt> value) {
@@ -1114,6 +1121,4 @@ void _do_warn(const char* _reason, const char* _kind) {
 void setWarn(warn_fn_type fn) {
   warn_callback.store(fn);
 }
-} // namespace tracer
-} // namespace jit
-} // namespace torch
+} // namespace torch::jit::tracer

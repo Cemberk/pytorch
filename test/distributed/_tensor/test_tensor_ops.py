@@ -2,14 +2,14 @@
 # Owner(s): ["oncall: distributed"]
 
 import torch
+from torch.distributed._tensor import DeviceMesh, distribute_tensor, DTensor
+from torch.distributed._tensor.placement_types import _Partial, Replicate, Shard
 from torch.testing._internal.common_utils import run_tests
 from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorConverter,
     DTensorTestBase,
     with_comms,
 )
-from torch.distributed._tensor import distribute_tensor, DeviceMesh, DTensor
-from torch.distributed._tensor.placement_types import Shard, Replicate, _Partial
 
 
 class DistTensorOpsTest(DTensorTestBase):
@@ -92,9 +92,7 @@ class DistTensorOpsTest(DTensorTestBase):
         shard_spec = [Shard(0)]
         partial_spec = [_Partial()]
         dt_to_inplace_add = distribute_tensor(input_tensor, mesh, shard_spec)
-        partial_grad = DTensor.from_local(
-            torch.randn(12, 3), mesh, partial_spec
-        )
+        partial_grad = DTensor.from_local(torch.randn(12, 3), mesh, partial_spec)
         res = dt_to_inplace_add.add_(partial_grad)
         self.assertTrue(res is dt_to_inplace_add)
         self.assertTrue(res.placements == shard_spec)
@@ -191,9 +189,7 @@ class DistTensorOpsTest(DTensorTestBase):
         assert dist_tensor.shape == (4, 8)
 
         torch.fill_(dist_tensor, 42)
-        fill_expected = torch.full(
-            dist_tensor.shape, 42, dtype=input_tensor.dtype
-        )
+        fill_expected = torch.full(dist_tensor.shape, 42, dtype=input_tensor.dtype)
         self.assertEqual(
             fill_expected,
             dist_tensor.redistribute(device_mesh, [Replicate()]).to_local(),
@@ -238,6 +234,32 @@ class DistTensorOpsTest(DTensorTestBase):
         zeros_expected = torch.zeros(4, 8)
         self.assertEqual(zeros_expected, zeros_like_dt.to_local())
 
+    @with_comms
+    def test_equal(self):
+        device_mesh = DeviceMesh(self.device_type, list(range(self.world_size)))
+        shard_spec = [Shard(0)]
+
+        input_tensor_1 = torch.ones(4, 4)
+        dist_tensor_1 = DTensor.from_local(input_tensor_1, device_mesh, shard_spec)
+
+        # tensors are equal
+        input_tensor_2 = torch.ones(4, 4)
+        dist_tensor_2 = DTensor.from_local(input_tensor_2, device_mesh, shard_spec)
+
+        eq_result = dist_tensor_1.equal(dist_tensor_2)
+        self.assertTrue(eq_result)
+
+        # tensors are different on some shards
+        if self.rank == 0:
+            input_tensor_2 = torch.ones(4, 4)
+        else:
+            input_tensor_2 = torch.randn(4, 4)
+        dist_tensor_2 = DTensor.from_local(input_tensor_2, device_mesh, shard_spec)
+
+        eq_result = dist_tensor_1.equal(dist_tensor_2)
+        # equal op all reduces each shard's local result
+        self.assertFalse(eq_result)
+
     def _test_op(self, mesh, op_call, *args, **kwargs):
         out = op_call(*args, **kwargs)
         dtc = DTensorConverter(mesh, args, kwargs)
@@ -252,9 +274,7 @@ class DistTensorOpsTest(DTensorTestBase):
     @with_comms
     def test_index(self):
         meshes = [
-            DeviceMesh(
-                self.device_type, list(range(self.world_size))
-            ),  # 1D mesh
+            DeviceMesh(self.device_type, list(range(self.world_size))),  # 1D mesh
             # TODO(@azzolini): un-comment when DTensorConverter supports N-D mesh
             # DeviceMesh(self.device_type, torch.arange(self.world_size).reshape(2, -1)), # 2D mesh
         ]

@@ -393,7 +393,7 @@ bool disableUnsafeMathOp(const char* op_name) {
   // not guarantee bit exactness vs the jit interpreter. Note aten::relu is not
   // included even though it uses NNC because the results of relu should always
   // match.
-  static const FastSet<std::string> fast_ops{
+  static const c10::FastSet<std::string> fast_ops{
       "aten::add", "aten::tanh", "aten::sigmoid", "aten::logit"};
   return fast_ops.count(op_name) > 0;
 }
@@ -417,7 +417,7 @@ bool hasVarArgs(Node* n) {
 
 bool canReuseInputsOutputs(
     Node* n,
-    const FastMap<Node*, bool>& node_has_out_variant) {
+    const c10::FastMap<Node*, bool>& node_has_out_variant) {
   auto it = node_has_out_variant.find(n);
   if (it != node_has_out_variant.end()) {
     return it->second;
@@ -430,7 +430,7 @@ bool canReuseInputsOutputs(
 // This means the IValues will not change run to run
 bool inputsCanRunOutOfPlace(
     Node* n,
-    const FastMap<Node*, bool>& node_has_out_variant) {
+    const c10::FastMap<Node*, bool>& node_has_out_variant) {
   for (auto* input : n->inputs()) {
     if (!canReuseInputsOutputs(input->node(), node_has_out_variant)) {
       return false;
@@ -441,7 +441,7 @@ bool inputsCanRunOutOfPlace(
 
 bool isOptimizableContainerType(
     Node* n,
-    const FastMap<Node*, bool>& node_has_out_variant) {
+    const c10::FastMap<Node*, bool>& node_has_out_variant) {
   const auto& type = n->output()->type();
   bool is_supported_type = false;
   if (type->kind() == TypeKind::ListType) {
@@ -488,7 +488,7 @@ REGISTER_OPERATOR_FUNCTOR(
         return nullptr;
       }
       const bool can_optimize =
-          isOptimizableContainerType(n, FastMap<Node*, bool>());
+          isOptimizableContainerType(n, c10::FastMap<Node*, bool>());
       const auto& type = n->output()->type()->expectRef<ListType>();
       const size_t size = n->inputs().size();
       if (!can_optimize) {
@@ -543,7 +543,7 @@ REGISTER_OPERATOR_FUNCTOR(
         return nullptr;
       }
       const bool can_optimize =
-          isOptimizableContainerType(n, FastMap<Node*, bool>());
+          isOptimizableContainerType(n, c10::FastMap<Node*, bool>());
       const size_t size = n->inputs().size();
       if (!can_optimize) {
         return [size](ProcessedNode* p_node) {
@@ -885,7 +885,7 @@ SROperator aten_stack(Node* n) {
   }
   return [](ProcessedNode* p_node) {
     const auto inputs = p_node->Input(0).toTensorVector();
-    TORCH_CHECK(inputs.size() > 0, "stack expects non-empty tensor list");
+    TORCH_CHECK(!inputs.empty(), "stack expects non-empty tensor list");
     const auto dim = p_node->Input(1).toInt();
     if (p_node->Output(0).isNone()) {
       p_node->Output(0) = at::native::_stack_cpu(inputs, dim);
@@ -1675,36 +1675,6 @@ REGISTER_OPERATOR_FUNCTOR(
       };
     });
 
-namespace {
-
-std::vector<std::int64_t> permute_output_sizes(
-    c10::IntArrayRef self_sizes,
-    c10::IntArrayRef dims) {
-  const auto nDim = dims.size();
-  TORCH_CHECK(
-      self_sizes.size() == nDim,
-      "permute input and output tensors must have the same rank, got input rank=",
-      self_sizes.size(),
-      "; output rank=",
-      nDim);
-  std::vector<bool> dims_seen(nDim, false);
-  std::vector<std::int64_t> output_sizes;
-  output_sizes.reserve(nDim);
-  for (size_t i = 0; i < nDim; ++i) {
-    auto dim = c10::maybe_wrap_dim(dims[i], nDim);
-    TORCH_CHECK(
-        !dims_seen[dim],
-        "permute dims must be unique, found duplicate dim=",
-        dim);
-
-    output_sizes.push_back(self_sizes[dim]);
-    dims_seen[dim] = true;
-  }
-  return output_sizes;
-}
-
-} // namespace
-
 // Out variants for view ops are registered to a separate registry because
 // their outputs (views) can't participate in memory reuse.
 REGISTER_OPERATOR_FUNCTOR(
@@ -1726,29 +1696,6 @@ REGISTER_OPERATOR_FUNCTOR(
         }
         auto& out = p_node->Output(0).toTensor();
         at::native::reshape_copy_out(out, self, proposed_shape, true);
-      };
-    });
-
-REGISTER_OPERATOR_FUNCTOR(
-    static_runtime::permute_copy,
-    sr_permute_copy,
-    [](Node* n) -> SROperator {
-      if (!n->matches(torch::schema(
-              "static_runtime::permute_copy(Tensor self, int[] dims) -> Tensor"))) {
-        LogAndDumpSchema(n);
-        return nullptr;
-      }
-      return [](ProcessedNode* p_node) {
-        const auto& self = p_node->Input(0).toTensor();
-        const auto dims = p_node->Input(1).toDimVector();
-
-        if (p_node->Output(0).isNone()) {
-          p_node->Output(0) = create_empty_from(self);
-        }
-        auto& output = p_node->Output(0).toTensor();
-        at::native::resize_(
-            output, permute_output_sizes(self.sizes(), dims), c10::nullopt);
-        at::native::permute_copy_out(self, dims, output);
       };
     });
 
@@ -2670,7 +2617,7 @@ REGISTER_OPERATOR_FUNCTOR(aten::cat, aten_cat, [](Node* n) -> SROperator {
   }
   return [](ProcessedNode* p_node) {
     const auto inputs = p_node->Input(0).toTensorVector();
-    TORCH_CHECK(inputs.size() > 0, "concat expects non-empty tensor list");
+    TORCH_CHECK(!inputs.empty(), "concat expects non-empty tensor list");
     const auto dim = p_node->Input(1).toInt();
     if (p_node->Output(0).isNone()) {
       p_node->Output(0) = at::cpu::cat(inputs, dim);

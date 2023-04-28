@@ -696,8 +696,8 @@ Tensor computeUpsampleNearest2d(
     const c10::optional<ScalarType>& outputType,
     at::Device) {
   auto A = c10::get<BufHandle>(inputs[0]);
-  auto output_height = outputShape[2];
-  auto output_width = outputShape[3];
+  const auto& output_height = outputShape[2];
+  const auto& output_width = outputShape[3];
   auto input_height = ExprHandle(A.dim(2));
   auto input_width = ExprHandle(A.dim(3));
 
@@ -707,7 +707,7 @@ Tensor computeUpsampleNearest2d(
   auto scale_h =
       promoteToDtype(input_height, ScalarType::Double) / output_height;
   auto scale_w = promoteToDtype(input_width, ScalarType::Double) / output_width;
-  // TODO: will repetetive if in idx calculation will be taken out of the loop?
+  // TODO: will repetitive if in idx calculation will be taken out of the loop?
   auto compute_nearest_idx =
       [](ExprHandle scale, ExprHandle dst_index, ExprHandle input_size) {
         return Min::make(

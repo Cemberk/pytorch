@@ -19,8 +19,7 @@
 #endif
 
 
-namespace at {
-namespace native {
+namespace at::native {
 
 template<typename T, int NormType, int depth=1, int r_args_depth=1, int res_arg_index=0>
 struct LpNormFunctor {
@@ -85,12 +84,12 @@ struct LpNormFunctor {
 
 template<typename T, int NormType, typename opmath_t = at::opmath_type<T>>
 __global__ void lpnorm_cleanup(
-    opmath_t* output_per_tensor,
+    const opmath_t* output_per_tensor,
     T* ret_per_tensor,
     int max_chunks_per_tensor) {
   __shared__ opmath_t vals[512];
 
-  opmath_t* output_this_tensor = output_per_tensor + blockIdx.x*max_chunks_per_tensor;
+  const opmath_t* output_this_tensor = output_per_tensor + blockIdx.x*max_chunks_per_tensor;
   opmath_t val = 0;
   for (int i = threadIdx.x; i < max_chunks_per_tensor; i += blockDim.x) {
     val += output_this_tensor[i];
@@ -128,7 +127,7 @@ std::vector<Tensor> foreach_tensor_norm_cuda(TensorList tensors, const Scalar& o
   int max_chunks_per_tensor = -1;
 
   for (int t = 0; t < ntensors; t++) {
-    int max_chunks_this_tensor = (tensors[0][t].numel() + kChunkSize - 1) / kChunkSize;
+    int max_chunks_this_tensor = (tensors[t].numel() + kChunkSize - 1) / kChunkSize;
     if(max_chunks_this_tensor > max_chunks_per_tensor) {
       max_chunks_per_tensor = max_chunks_this_tensor;
     }
@@ -145,14 +144,14 @@ std::vector<Tensor> foreach_tensor_norm_cuda(TensorList tensors, const Scalar& o
         multi_tensor_apply<1>(
           tensor_lists,
           LpNormFunctor<scalar_t, 1>(),
-          output_per_tensor.data_ptr<opmath_t>(),
+          output_per_tensor.mutable_data_ptr<opmath_t>(),
           max_chunks_per_tensor);
         C10_CUDA_KERNEL_LAUNCH_CHECK();
         const at::cuda::OptionalCUDAGuard device_guard(device_of(output_per_tensor));
         auto stream = at::cuda::getCurrentCUDAStream();
         lpnorm_cleanup<scalar_t, 1><<<ntensors, 512, 0, stream>>>(
-          output_per_tensor.data_ptr<opmath_t>(),
-          ret_per_tensor.data_ptr<scalar_t>(),
+          output_per_tensor.const_data_ptr<opmath_t>(),
+          ret_per_tensor.mutable_data_ptr<scalar_t>(),
           max_chunks_per_tensor);
         C10_CUDA_KERNEL_LAUNCH_CHECK();
       });
@@ -163,14 +162,14 @@ std::vector<Tensor> foreach_tensor_norm_cuda(TensorList tensors, const Scalar& o
         multi_tensor_apply<1>(
           tensor_lists,
           LpNormFunctor<scalar_t, 2>(),
-          output_per_tensor.data_ptr<opmath_t>(),
+          output_per_tensor.mutable_data_ptr<opmath_t>(),
           max_chunks_per_tensor);
         C10_CUDA_KERNEL_LAUNCH_CHECK();
         const at::cuda::OptionalCUDAGuard device_guard(device_of(output_per_tensor));
         auto stream = at::cuda::getCurrentCUDAStream();
         lpnorm_cleanup<scalar_t, 2><<<ntensors, 512, 0, stream>>>(
-          output_per_tensor.data_ptr<opmath_t>(),
-          ret_per_tensor.data_ptr<scalar_t>(),
+          output_per_tensor.const_data_ptr<opmath_t>(),
+          ret_per_tensor.mutable_data_ptr<scalar_t>(),
           max_chunks_per_tensor);
         C10_CUDA_KERNEL_LAUNCH_CHECK();
       });
@@ -186,5 +185,4 @@ std::vector<Tensor> foreach_tensor_norm_cuda(TensorList tensors, const Scalar& o
   return result;
 }
 
-} // namespace native
-} // namespace at
+} // namespace at::native

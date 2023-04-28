@@ -14,6 +14,7 @@ _impls: Set[str] = set()
 # prim is reserved by TorchScript interpreter
 _reserved_namespaces = ['prim']
 
+
 class Library:
     """
     A class to create libraries that can be used to register new operators or
@@ -23,16 +24,20 @@ class Library:
 
     To create a library to override operators in an existing library (with name ns), set the kind to "IMPL".
     To create a new library (with name ns) to register new operators, set the kind to "DEF".
+    To create a fragment of a possibly existing library to register operators (and bypass
+    the limitation that there is only one library for a given namespace), set the kind to
+    "FRAGMENT".
+
     Args:
         ns: library name
-        kind: "DEF", "IMPL" (default: "IMPL")
+        kind: "DEF", "IMPL" (default: "IMPL"), "FRAGMENT"
         dispatch_key: PyTorch dispatch key (default: "")
     """
     def __init__(self, ns, kind, dispatch_key=""):
-        if kind != "IMPL" and kind != "DEF":
+        if kind not in ('IMPL', 'DEF', 'FRAGMENT'):
             raise ValueError("Unsupported kind: ", kind)
 
-        if ns in _reserved_namespaces and kind == "DEF":
+        if ns in _reserved_namespaces and (kind == "DEF" or kind == 'FRAGMENT'):
             raise ValueError(ns, " is a reserved namespace. Please try creating a library with another name.")
 
         frame = traceback.extract_stack(limit=3)[0]
@@ -57,6 +62,7 @@ class Library:
             name of the operator as inferred from the schema.
 
         Example::
+            >>> # xdoctest: +REQUIRES(env:TORCH_DOCTEST_LIBRARY)
             >>> my_lib = Library("foo", "DEF")
             >>> my_lib.define("sum(Tensor self) -> Tensor")
         '''
@@ -76,11 +82,10 @@ class Library:
                           the dispatch key that the library was created with.
 
         Example::
-            >>> # xdoctest: +SKIP
             >>> my_lib = Library("aten", "IMPL")
             >>> def div_cpu(self, other):
-            >>>    return self * (1 / other)
-            >>> my_lib.impl("div.Tensor", "CPU")
+            >>>     return self * (1 / other)
+            >>> my_lib.impl("div.Tensor", div_cpu, "CPU")
         '''
         if not callable(fn):
             raise TypeError("Input function is required to be a callable but found type {}".format(type(fn)))
@@ -104,7 +109,6 @@ class Library:
             raise RuntimeError("This is not allowed since there's already a kernel registered from python overriding {}"
                                "'s behavior for {} dispatch key and {} namespace.".
                                format(name.split("::")[-1], dispatch_key, self.ns))
-
 
         if dispatch_key == "Meta":
             dispatcher_op_name = name
@@ -135,6 +139,7 @@ class Library:
                 _impls.remove(key)
             del self.m
 
+
 # decorator to register python functions for library ops
 # Note: this decorator API should remain consistent with `Library.impl` API
 def impl(lib, name, dispatch_key=""):
@@ -142,6 +147,7 @@ def impl(lib, name, dispatch_key=""):
         lib.impl(name, f, dispatch_key)
         return f
     return wrap
+
 
 def define(lib, schema, alias_analysis=""):
     def wrap(f):

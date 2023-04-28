@@ -1,5 +1,5 @@
 // #define TORCH_ASSERT_ONLY_METHOD_OPERATORS
-#include <ATen/SparseTensorUtils.h>
+#include <ATen/native/SparseTensorUtils.h>
 #include <ATen/core/Tensor.h>
 
 #ifndef AT_PER_OPERATOR_HEADERS
@@ -43,6 +43,8 @@
 #include <ATen/ops/log1p_native.h>
 #include <ATen/ops/nan_to_num.h>
 #include <ATen/ops/nan_to_num_native.h>
+#include <ATen/ops/rad2deg.h>
+#include <ATen/ops/rad2deg_native.h>
 #include <ATen/ops/relu.h>
 #include <ATen/ops/relu_native.h>
 #include <ATen/ops/round.h>
@@ -70,8 +72,7 @@
 #include <ATen/ops/trunc_native.h>
 #endif
 
-namespace at {
-namespace native {
+namespace at::native {
 namespace {
 
 template <typename Ufunc>
@@ -177,6 +178,7 @@ COALESCED_UNARY_UFUNC(floor);
 COALESCED_UNARY_UFUNC(frac);
 COALESCED_UNARY_UFUNC(log1p);
 COALESCED_UNARY_UFUNC(round);
+COALESCED_UNARY_UFUNC(rad2deg);
 COALESCED_UNARY_UFUNC(sign);
 COALESCED_UNARY_UFUNC(sgn);
 COALESCED_UNARY_UFUNC(sin);
@@ -204,14 +206,21 @@ Tensor threshold_backward_sparse(
     const Tensor& grad_output,
     const Tensor& self,
     const Scalar& threshold) {
-  auto self_v = [&self]() {
+  const auto grad = [&]() {
+    if (!grad_output._nnz() && self._nnz() > 0) {
+      return at::sparse::zeros_like_with_indices(self);
+    } else {
+      return grad_output;
+    }
+  }();
+  const auto self_v = [&self]() {
     if (self.is_coalesced()) {
       return self.values();
     } else {
       return self.coalesce().values();
     }
   }();
-  return coalesced_unary_ufunc(grad_output, [&](const Tensor& t) {
+  return coalesced_unary_ufunc(grad, [&](const Tensor& t) {
     return at::threshold_backward(t, self_v, threshold);
   });
 }
@@ -221,6 +230,13 @@ Tensor& threshold_backward_sparse_out(
     const Tensor& self,
     const Scalar& threshold,
     Tensor& grad_input) {
+  const auto grad = [&]() {
+    if (!grad_output._nnz() && self._nnz() > 0) {
+      return at::sparse::zeros_like_with_indices(self);
+    } else {
+      return grad_output;
+    }
+  }();
   auto self_v = [&self]() {
     if (self.is_coalesced()) {
       return self.values();
@@ -229,7 +245,7 @@ Tensor& threshold_backward_sparse_out(
     }
   }();
   return coalesced_unary_ufunc_out(
-      grad_output, grad_input, [&](const Tensor& t, Tensor& out) {
+      grad, grad_input, [&](const Tensor& t, Tensor& out) {
         return at::threshold_backward_outf(t, self_v, threshold, out);
       });
 }
@@ -258,4 +274,4 @@ Tensor& nan_to_num_sparse_(
   return nan_to_num_sparse_out(self, nan, posinf, neginf, self);
 }
 
-}}  // namespace at::native
+}  // namespace at::native

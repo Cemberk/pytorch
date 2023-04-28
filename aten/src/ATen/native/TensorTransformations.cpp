@@ -27,6 +27,7 @@
 #endif
 
 #include <algorithm>
+#include <utility>
 #include <vector>
 
 namespace at {
@@ -98,7 +99,7 @@ Tensor flip(const Tensor& self, IntArrayRef dims) {
   return out_tensor;
 }
 
-Tensor roll_cpu(const Tensor& self, IntArrayRef shifts, IntArrayRef dims) {
+Tensor roll(const Tensor& self, IntArrayRef shifts, IntArrayRef dims) { // Used by CPU and MPS dispatch.
   if (dims.size() != 1 || shifts.size() != 1) {
     return roll_common(self, shifts, dims);
   }
@@ -116,7 +117,7 @@ Tensor roll_cpu(const Tensor& self, IntArrayRef shifts, IntArrayRef dims) {
   }
   auto t0 = self.narrow(dim, start, size-start);
   auto t1 = self.narrow(dim, 0, start);
-  return at::cat({t0, t1}, dim);
+  return at::cat({std::move(t0), std::move(t1)}, dim);
 }
 
 Tensor rot90(const Tensor& self, int64_t k, IntArrayRef dims) {

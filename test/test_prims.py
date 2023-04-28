@@ -13,7 +13,6 @@ from torch.testing._internal.common_utils import (parametrize, run_tests, TestCa
 from torch.testing._internal.common_device_type import (
     instantiate_device_type_tests,
     onlyCUDA,
-    skipCUDAIfRocm,
     dtypes,
     OpDTypes,
 )
@@ -26,6 +25,7 @@ from torch.testing._internal.common_device_type import (
 
 from torch.testing._internal.logging_tensor import LoggingTensor, capture_logs, log_input
 import torch._prims as prims
+from torch._prims_common import CUDARngStateHelper
 from torch._prims.executor import make_traced
 import torch._refs as refs
 from torch.fx.experimental.proxy_tensor import make_fx
@@ -39,7 +39,6 @@ GET_ISOLATED_GRAPHMODULE_ERROR = "get_isolated_graphmodule failed on decompositi
 
 class TestPrims(TestCase):
     @onlyCUDA
-    @skipCUDAIfRocm
     @dtypes(torch.float32)
     def test_broadcast_in_dim(self, device, dtype):
         def _wrapper(a, b, broadcast_dimensions):
@@ -103,7 +102,6 @@ class TestPrims(TestCase):
             """
 
     @onlyCUDA
-    @skipCUDAIfRocm
     @dtypes(torch.float32)
     def test_broadcast_in_dim_sum(self, device, dtype):
         def _wrapper(a):
@@ -143,13 +141,46 @@ class TestPrims(TestCase):
 
                 self.assertEqual(y, y_np, exact_device=False)
 
+    @dtypes(torch.float32)
+    def test_collapse(self, device, dtype):
+        t = torch.rand(2, 2, 2)
+        dim_ranges = [(0, 0), (0, 1), (1, 2), (0, 2)]
+        expected_shapes = [(2, 2, 2), (4, 2), (2, 4), (8,)]
+
+        for (start, end), shape in zip(dim_ranges, expected_shapes):
+            expect = t.reshape(shape)
+
+            copy = prims.collapse(t, start, end)
+            self.assertEqual(copy, expect)
+            self.assertFalse(copy._is_view())
+
+            view = prims.collapse_view(t, start, end)
+            self.assertEqual(view, expect)
+            self.assertTrue(view._is_view())
+
+        t_discontig = t.transpose(0, 1)
+        with self.assertRaises(ValueError, msg="no such view exists"):
+            view = prims.collapse_view(t_discontig, 0, 2)
+
+        copy = prims.collapse(t_discontig, 0, 1)
+        self.assertEqual(copy, t_discontig.reshape(4, 2))
+
+        error_dims = [(-1, 1), (0, 3), (1, -1)]
+        for start, end in error_dims:
+            for fn in [prims.collapse, prims.collapse_view]:
+                with self.assertRaises(AssertionError):
+                    fn(t, start, end)
+
     @onlyCUDA
-    @skipCUDAIfRocm
     def test_nvfuser_impl_is_used(self, device):
         # This test is to ensure that when the nvfuser implementation exists it is used
         # Assuming one-to-one mapping between prims and nvfuser implementations
         # This test is not intended to test the correctness of the nvfuser implementation
-        from torch._C._nvfuser import FusionDefinition as fd
+        try:
+            from nvfuser import FusionDefinition as fd
+        except ImportError:
+            from nvfuser._C import FusionDefinition as fd
+
 
         prim_nvfuser_ops = set(torch._prims.__all__).intersection(dir(fd.ops))
         ops_without_nvfuser_impl = {
@@ -235,7 +266,45 @@ class TestPrims(TestCase):
         self.assertEqual(len(partitions), 1)
 
     @onlyCUDA
-    @skipCUDAIfRocm
+    @dtypes(torch.float32)
+    def test_full(self, device, dtype):
+        from torch.fx.experimental.proxy_tensor import make_fx
+        from torch._prims.context import TorchRefsNvfuserCapabilityMode
+        from torch._prims.executor import execute
+
+        def func1(size, value, b):
+            return (torch.full(size, value, dtype=dtype, device=device),)
+
+        def func2(size, value, b):
+            a = torch.full(size, value, dtype=dtype, device=device)
+            b_sin = b.sin()
+            return (torch.add(a, b_sin),)
+
+        def func3(size, value, b):
+            return (torch.full(size, value, dtype=dtype, device=device), b)
+
+        def func4(size, value, b):
+            b_sin = b.sin()
+            return (torch.full(size, value, dtype=dtype, device=device), b_sin)
+
+        def func5(size, value, b):
+            b_sin = b.sin()
+            a = torch.full(size, value, dtype=dtype, device=device)
+            a_sin = a.sin()
+            return (a, b_sin, a_sin)
+
+        for func in (func1, func3, func2, func3, func4, func5):
+            size = (3, 3)
+            value = 10
+            b = torch.randn(*size, dtype=dtype, device=device)
+
+            with TorchRefsNvfuserCapabilityMode():
+                gm = make_fx(func)(size, value, b)
+
+            out = execute(gm, size, value, b, executor="strictly_nvfuser")
+            self.assertEqual(out, func(size, value, b))
+
+    @onlyCUDA
     def test_nvfuser_empty_fusion(self, device):
         from torch.fx.experimental.proxy_tensor import make_fx
         from torch._prims.executor import execute
@@ -287,7 +356,6 @@ class TestPrims(TestCase):
         self.assertEqual(includes_nvprim_convert_element_type, nvprim_support_flag)
 
     @onlyCUDA
-    @skipCUDAIfRocm
     def test_nvfuser_rand_like_fusion(self, device):
         from torch._prims.context import TorchRefsNvfuserCapabilityMode
         from torch.fx.experimental.proxy_tensor import make_fx
@@ -306,7 +374,6 @@ class TestPrims(TestCase):
 
     @skipCUDAMemoryLeakCheckIf(True)  # https://github.com/pytorch/pytorch/issues/84529
     @onlyCUDA
-    @skipCUDAIfRocm
     def test_nvfuser_no_args(self, device):
         from torch._prims.context import TorchRefsNvfuserCapabilityMode
         from torch.fx.experimental.proxy_tensor import make_fx
@@ -337,7 +404,6 @@ class TestPrims(TestCase):
         self.assertEqual(out, func())
 
     @onlyCUDA
-    @skipCUDAIfRocm
     def test_nvfuser_constant_tensors(self, device):
         from torch._prims.context import TorchRefsNvfuserCapabilityMode
         from torch.fx.experimental.proxy_tensor import make_fx
@@ -360,7 +426,6 @@ class TestPrims(TestCase):
         self.assertEqual(out, gm(b))
 
     @onlyCUDA
-    @skipCUDAIfRocm
     def test_nvfuser_executor_cached_noncontiguous(self, device):
         # This test is to ensure that nvfuser computes correct results for noncontiguous tensors
         from torch.fx.experimental.proxy_tensor import make_fx
@@ -463,7 +528,6 @@ class TestPrims(TestCase):
 
 
     @onlyCUDA
-    @skipCUDAIfRocm
     def test_nvfuser_executor_parameters(self, device):
         from torch.fx.experimental.proxy_tensor import make_fx
         from torch._prims.executor import execute
@@ -496,7 +560,6 @@ class TestPrims(TestCase):
 
 
     @onlyCUDA
-    @skipCUDAIfRocm
     def test_nvfuser_executor_partitioned(self, device):
         # This test is to ensure that nvfuser partitioned executor works correctly
         # It's assumed that digamma is not supported by nvfuser
@@ -525,7 +588,6 @@ class TestPrims(TestCase):
         self.assertEqual(expected, actual)
 
     @onlyCUDA
-    @skipCUDAIfRocm
     def test_nvfuser_executor_partitioned_no_partitions_error(self, device):
         # This test is to ensure that nvfuser partitioned executor works correctly
         # It's assumed that digamma is not supported by nvfuser
@@ -570,7 +632,6 @@ class TestPrims(TestCase):
                 self.assertFalse(node.target == torch.ops.aten.add.default)
 
     @onlyCUDA
-    @skipCUDAIfRocm
     @dtypes(torch.float32, torch.float64)
     def test_native_batch_norm_nvprims(self, device, dtype):
         from torch._prims.context import TorchRefsNvfuserCapabilityMode
@@ -633,7 +694,6 @@ class TestPrims(TestCase):
             self.assertEqual(out, gm(sample.input, *sample.args))
 
     @onlyCUDA
-    @skipCUDAIfRocm
     @dtypes(torch.float32, torch.float64)
     def test_cudnn_batch_norm_nvprims(self, device, dtype):
         from torch._prims.context import TorchRefsNvfuserCapabilityMode
@@ -687,7 +747,13 @@ class TestPrims(TestCase):
 
             # Check that the graph can be executed with nvFuser
             out = execute(gm, sample.input, *sample.args, executor="nvfuser")
-            self.assertEqual(out, gm(sample.input, *sample.args))
+            ref_out = gm(sample.input, *sample.args)
+            for idx, (left, right) in enumerate(zip(out, ref_out)):
+                # Nvfuser does not support torch.uint8 dtype so check reserve output against 0 scalar
+                if idx == 3:
+                    self.assertTrue(torch.all(torch.eq(left, 0)))
+                else:
+                    self.assertEqual(left, right)
 
     # decomposition of native_batch_norm_backward uses a casting, which prevents nvprim lowering on CPU build
     @onlyCUDA
@@ -732,7 +798,6 @@ class TestPrims(TestCase):
             self.assertTrue(all_nvprims)
 
     @onlyCUDA
-    @skipCUDAIfRocm
     @dtypes(torch.float32)
     def test_silu_backward_no_filled_tensor(self, device, dtype):
         # This test verifies a workaround for
@@ -781,7 +846,6 @@ class TestPrims(TestCase):
 
 
     @onlyCUDA
-    @skipCUDAIfRocm
     @dtypes(torch.float32)
     @parametrize("correction", [0, 1])
     def test_var(self, device, dtype, correction):
@@ -802,7 +866,6 @@ class TestPrims(TestCase):
             self.assertEqual(_wrapper(a), result)
 
     @onlyCUDA
-    @skipCUDAIfRocm
     @dtypes(torch.float16, torch.float32)
     @parametrize("correction", [0, 1])
     @parametrize("keepdim", [True, False])
@@ -827,7 +890,6 @@ class TestPrims(TestCase):
         self.assertTrue(includes_nvprims_var_mean)
 
     @onlyCUDA
-    @skipCUDAIfRocm
     @dtypes(torch.float16, torch.float32)
     def test_nvprims_view(self, device, dtype):
         from torch.fx.experimental.proxy_tensor import make_fx
@@ -874,7 +936,6 @@ class TestPrims(TestCase):
             self.assertEqual(out, func(a))
 
     @onlyCUDA
-    @skipCUDAIfRocm
     @dtypes(torch.float16, torch.float32)
     def test_nvprims_view_partitioner(self, device, dtype):
         # This test verifies that views that are not fused with other ops are
@@ -900,7 +961,6 @@ class TestPrims(TestCase):
         self.assertEqual(out, func(a, b))
 
     @onlyCUDA
-    @skipCUDAIfRocm
     @dtypes(torch.float32, torch.float16)
     def test_cpu_tensor(self, device, dtype):
         from torch.fx.experimental.proxy_tensor import make_fx
@@ -941,7 +1001,6 @@ class TestPrims(TestCase):
         self.assertEqual(expected, nvprim_aten_fallback)
 
     @onlyCUDA
-    @skipCUDAIfRocm
     @dtypes(torch.float32)
     def test_pytree_input_output(self, device, dtype):
         @make_traced
@@ -1037,6 +1096,34 @@ class TestPrims(TestCase):
         self.assertEqual(result_eager, result_refs)
 
 
+    @onlyCUDA
+    @dtypes(torch.float32)
+    def test_philox_rand(self, device, dtype):
+        sizes = (1000, 1000000)  # offsets of 4 and 8
+        repeats = 2  # Checks multiple rand calls results with multiple philox_rand calls
+        for size in sizes:
+            torch.cuda.manual_seed(123)
+            references = []
+            results = []
+            rng_states = []
+            for _ in range(repeats):
+                rng_states.append(CUDARngStateHelper.get_torch_state_as_tuple())
+                references.append(torch.rand(size, device=device, dtype=dtype))
+
+            torch.cuda.manual_seed(123)
+            for idx in range(repeats):
+                seed, offset = rng_states[idx]
+                result, _ = torch.ops.rngprims.philox_rand((size,),
+                                                           seed=seed,
+                                                           offset=offset,
+                                                           stride=None,
+                                                           device=device,
+                                                           dtype=dtype)
+                results.append(result)
+
+            for a, b in zip(references, results):
+                self.assertEqual(a, b)
+
 class TestPrimsBasic(TestCase):
     def test_torch_ops(self):
         r = make_tensor((2,), device='cpu', dtype=torch.float)
@@ -1092,13 +1179,20 @@ class TestRefs(TestCase):
         self.assertEqual(actual.stride(), expect.stride())
         self.assertTrue(actual.is_contiguous())
 
+    def test_unbind(self):
+        # If unbind returns empty tuple, it breaks some assumptions in some backward tests in test_ops.py.
+        # So can't put this test into common_methods_invocations.py.
+        a = torch.rand([3, 0, 4])
+        actual = refs.unbind(a, 1)
+        expect = torch.unbind(a, 1)
+        self.assertEqual(actual, expect)
+
 
 instantiate_device_type_tests(TestRefs, globals())
 
 
 class TestDecomp(TestCase):
     @onlyCUDA
-    @skipCUDAIfRocm
     @dtypes(torch.float16, torch.float32)
     def test_decomposition_type_promotion_nvprim_amp(self, device, dtype):
         x = torch.rand(5, device=device).to(dtype)
@@ -1139,11 +1233,9 @@ class TestDecomp(TestCase):
             self.assertFalse(includes_aten_to_copy)
 
     @onlyCUDA
-    @skipCUDAIfRocm
     @dtypes(torch.float16, torch.float32)
     def test_masked_fill_decomposition_under_nvprim_context(self, device, dtype):
-        # masked_fill decomposition extracts cpu scalar tensor value when
-        # filling out a cuda tensor. This triggers data-dependent control flow
+        # Test masked_fill decomposition doesn't trigger data-dependent control flow
         # on TorchRefsNvfuser speculative lowering.
         from torch.fx.experimental.proxy_tensor import make_fx
         from torch._prims.context import TorchRefsNvfuserCapabilityMode
@@ -1162,7 +1254,7 @@ class TestDecomp(TestCase):
             with TorchRefsNvfuserCapabilityMode():
                 gm = make_fx(gm)(x, mask, y)
         # masked_fill decomposition fails inside `get_isolated_graphmodule`
-        self.assertTrue(any(GET_ISOLATED_GRAPHMODULE_ERROR in str(w.message) for w in caught))
+        self.assertFalse(any(GET_ISOLATED_GRAPHMODULE_ERROR in str(w.message) for w in caught))
 
     @ops([op for op in op_db if op.supports_varargs], dtypes=OpDTypes.any_one)
     def test_decomposition_method_vararg(self, device, dtype, op):
